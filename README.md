@@ -27,10 +27,10 @@ chmod +x ./ocs-ai-answerer
 
 | 字段 | 说明 |
 | --- | --- |
-| `base_url` | 上游 API 基础地址，通常以 `/v1` 结尾；程序会自动追加 `/responses`。 |
+| `base_url` | 上游 API 基础地址，程序会自动追加 `/responses`。 |
 | `api_key` | 上游 API 密钥。 |
 | `model` | 模型名称，需支持 Responses API 和结构化输出。 |
-| `token` | 自行设置的 OCS 访问口令，建议使用较长的随机字母和数字。 |
+| `token` | 自行设置的 OCS 访问口令，建议使用较长的随机字母和数字。注意不是AI API的token！ |
 | `listen` | 监听地址，默认为 `127.0.0.1:7777`。 |
 
 `config.json` 包含密钥，请勿分享或提交到 Git。题目和图片地址会发送给配置的上游服务。
