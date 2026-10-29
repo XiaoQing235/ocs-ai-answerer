@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"html"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -20,6 +22,14 @@ import (
 )
 
 type config struct{ endpoint, apiKey, model, token string }
+
+type fileConfig struct {
+	BaseURL string `json:"base_url"`
+	APIKey  string `json:"api_key"`
+	Model   string `json:"model"`
+	Token   string `json:"token"`
+	Listen  string `json:"listen"`
+}
 
 type question struct {
 	Title   string `json:"title"`
@@ -31,19 +41,61 @@ var imageURL = regexp.MustCompile(`(?i)https?://[^\s"'<>]+?\.(?:png|jpe?g|webp|g
 var optionPrefix = regexp.MustCompile(`^\s*[A-Za-z][.、．)）:]\s*`)
 
 func main() {
-	c := config{endpoint: strings.TrimRight(os.Getenv("OPENAI_BASE_URL"), "/"), apiKey: os.Getenv("OPENAI_API_KEY"), model: os.Getenv("OPENAI_MODEL"), token: os.Getenv("OCS_TOKEN")}
-	u, err := url.Parse(c.endpoint)
-	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" || c.apiKey == "" || c.model == "" || c.token == "" {
-		log.Fatal("OPENAI_BASE_URL, OPENAI_API_KEY, OPENAI_MODEL and OCS_TOKEN must be configured")
+	path := flag.String("config", "", "path to configuration file")
+	flag.Parse()
+	if *path == "" {
+		executable, err := os.Executable()
+		if err != nil {
+			log.Fatal("cannot determine executable location")
+		}
+		*path = filepath.Join(filepath.Dir(executable), "config.json")
 	}
-	address := os.Getenv("OCS_LISTEN")
-	if address == "" {
-		address = "127.0.0.1:5000"
+	c, address, err := loadConfig(*path)
+	if err != nil {
+		log.Fatal(err)
 	}
 	client := &http.Client{Timeout: 60 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	server := &http.Server{Addr: address, Handler: handler(c, client), ReadHeaderTimeout: 5 * time.Second}
 	log.Printf("listening on %s", address)
 	log.Fatal(server.ListenAndServe())
+}
+
+func loadConfig(path string) (config, string, error) {
+	var raw fileConfig
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		file, createErr := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+		if createErr != nil {
+			return config{}, "", fmt.Errorf("cannot create config: %w", createErr)
+		}
+		encoder := json.NewEncoder(file)
+		encoder.SetIndent("", "  ")
+		writeErr := encoder.Encode(fileConfig{Listen: "127.0.0.1:7777"})
+		closeErr := file.Close()
+		if writeErr != nil {
+			return config{}, "", fmt.Errorf("cannot write config: %w", writeErr)
+		}
+		if closeErr != nil {
+			return config{}, "", fmt.Errorf("cannot write config: %w", closeErr)
+		}
+		return config{}, "", fmt.Errorf("created config file %s; fill in its settings and restart", path)
+	}
+	if err != nil {
+		return config{}, "", fmt.Errorf("cannot read config: %w", err)
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return config{}, "", errors.New("invalid JSON configuration")
+	}
+	c := config{endpoint: strings.TrimRight(strings.TrimSpace(raw.BaseURL), "/"), apiKey: raw.APIKey, model: strings.TrimSpace(raw.Model), token: raw.Token}
+	u, err := url.Parse(c.endpoint)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" || strings.TrimSpace(c.apiKey) == "" || c.model == "" || strings.TrimSpace(c.token) == "" {
+		return config{}, "", errors.New("configure base_url, api_key, model and token in the JSON file")
+	}
+	address := strings.TrimSpace(raw.Listen)
+	if address == "" {
+		address = "127.0.0.1:7777"
+	}
+	return c, address, nil
 }
 
 func handler(c config, client *http.Client) http.Handler {

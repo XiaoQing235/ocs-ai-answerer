@@ -5,9 +5,53 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestLoadConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if _, _, err := loadConfig(path); err == nil {
+		t.Fatal("expected new configuration to require editing")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var generated fileConfig
+	if err := json.Unmarshal(data, &generated); err != nil || generated.Listen != "127.0.0.1:7777" || generated.APIKey != "" || generated.Token != "" {
+		t.Fatalf("invalid generated config: %v", err)
+	}
+	if _, _, err := loadConfig(path); err == nil {
+		t.Fatal("expected blank configuration to fail")
+	}
+	valid := fileConfig{BaseURL: "https://example.com/v1/", APIKey: "test", Model: "test", Token: "test"}
+	data, _ = json.Marshal(valid)
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	c, listen, err := loadConfig(path)
+	if err != nil || c.endpoint != "https://example.com/v1" || listen != "127.0.0.1:7777" {
+		t.Fatalf("unexpected configuration: %v, %s", err, listen)
+	}
+	valid.Listen = "127.0.0.1:9000"
+	data, _ = json.Marshal(valid)
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, listen, err = loadConfig(path)
+	if err != nil || listen != valid.Listen {
+		t.Fatalf("custom listen: %v, %s", err, listen)
+	}
+	if err := os.WriteFile(path, []byte("{"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := loadConfig(path); err == nil {
+		t.Fatal("expected invalid JSON to fail")
+	}
+}
 
 func response(answers string) string {
 	text, _ := json.Marshal(`{"answers":` + answers + `}`)
