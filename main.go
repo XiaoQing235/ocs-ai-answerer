@@ -134,6 +134,10 @@ func handler(c config, client *http.Client) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/answer", func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
+		if r.Method == http.MethodGet || r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return

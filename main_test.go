@@ -179,6 +179,23 @@ func TestAuthentication(t *testing.T) {
 	}
 }
 
+func TestConnectionProbe(t *testing.T) {
+	for _, method := range []string{http.MethodHead, http.MethodGet} {
+		req := httptest.NewRequest(method, "/api/answer?t=123", nil)
+		w := httptest.NewRecorder()
+		handler(config{ocsTokens: []string{"test"}}, http.DefaultClient).ServeHTTP(w, req)
+		if w.Code != http.StatusNoContent || w.Body.Len() != 0 {
+			t.Errorf("%s: status %d body %q", method, w.Code, w.Body.String())
+		}
+	}
+	req := httptest.NewRequest(http.MethodPut, "/api/answer", nil)
+	w := httptest.NewRecorder()
+	handler(config{ocsTokens: []string{"test"}}, http.DefaultClient).ServeHTTP(w, req)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("PUT: status %d", w.Code)
+	}
+}
+
 func TestRetryAndImages(t *testing.T) {
 	attempts := 0
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
