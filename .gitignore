@@ -4,3 +4,4 @@
 /ocs-go-answerer
 /ocs-ai-answerer
 /config.json
+*.jsonl

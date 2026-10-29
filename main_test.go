@@ -30,6 +30,9 @@ func TestResponseSettings(t *testing.T) {
 					t.Error(err)
 					return
 				}
+				if _, ok := body["stream"]; ok {
+					t.Error("stream enabled with logging disabled")
+				}
 				if tc.effort == "" {
 					if _, ok := body["reasoning"]; ok {
 						t.Error("unexpected reasoning")
@@ -56,7 +59,7 @@ func TestResponseSettings(t *testing.T) {
 			}))
 			defer upstream.Close()
 			path := filepath.Join(t.TempDir(), "config.json")
-			data, err := json.Marshal(fileConfig{BaseURL: upstream.URL, APIKey: "test", Model: "test", Token: "test", ReasoningEffort: tc.effort, MaxOutputTokens: tc.limit})
+			data, err := json.Marshal(fileConfig{BaseURL: upstream.URL, APIKey: "test", Model: "test", OCSToken: []string{"test"}, ReasoningEffort: tc.effort, MaxOutputTokens: tc.limit})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -84,7 +87,7 @@ func TestInvalidResponseSettings(t *testing.T) {
 		{limit: -1},
 	} {
 		path := filepath.Join(t.TempDir(), "config.json")
-		data, err := json.Marshal(fileConfig{BaseURL: "https://example.com/v1", APIKey: "test", Model: "test", Token: "test", ReasoningEffort: tc.effort, MaxOutputTokens: tc.limit})
+		data, err := json.Marshal(fileConfig{BaseURL: "https://example.com/v1", APIKey: "test", Model: "test", OCSToken: []string{"test"}, ReasoningEffort: tc.effort, MaxOutputTokens: tc.limit})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -107,13 +110,13 @@ func TestLoadConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	var generated fileConfig
-	if err := json.Unmarshal(data, &generated); err != nil || generated.Listen != "127.0.0.1:7777" || generated.APIKey != "" || generated.Token != "" {
+	if err := json.Unmarshal(data, &generated); err != nil || generated.Listen != "127.0.0.1:7777" || generated.APIKey != "" || len(generated.OCSToken) != 0 {
 		t.Fatalf("invalid generated config: %v", err)
 	}
 	if _, _, err := loadConfig(path); err == nil {
 		t.Fatal("expected blank configuration to fail")
 	}
-	valid := fileConfig{BaseURL: "https://example.com/v1/", APIKey: "test", Model: "test", Token: "test"}
+	valid := fileConfig{BaseURL: "https://example.com/v1/", APIKey: "test", Model: "test", OCSToken: []string{"test"}}
 	data, _ = json.Marshal(valid)
 	if err := os.WriteFile(path, data, 0600); err != nil {
 		t.Fatal(err)
@@ -154,7 +157,7 @@ func TestAnswerTypes(t *testing.T) {
 		t.Run(tc.kind, func(t *testing.T) {
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, response(tc.modelAnswer)) }))
 			defer upstream.Close()
-			c := config{endpoint: upstream.URL, model: "test", apiKey: "test", token: "test"}
+			c := config{endpoint: upstream.URL, model: "test", apiKey: "test", ocsTokens: []string{"test"}}
 			req := httptest.NewRequest(http.MethodPost, "/api/answer", strings.NewReader(fmt.Sprintf(`{"title":"question","type":%q,"options":"A. one\nB. two"}`, tc.kind)))
 			req.Header.Set("Authorization", "Bearer test")
 			w := httptest.NewRecorder()
@@ -170,7 +173,7 @@ func TestAnswerTypes(t *testing.T) {
 func TestAuthentication(t *testing.T) {
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/answer", strings.NewReader(`{}`))
-	handler(config{token: "test"}, http.DefaultClient).ServeHTTP(w, req)
+	handler(config{ocsTokens: []string{"test"}}, http.DefaultClient).ServeHTTP(w, req)
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("got %d", w.Code)
 	}
@@ -206,7 +209,7 @@ func TestRetryAndImages(t *testing.T) {
 		fmt.Fprint(w, response(`["1"]`))
 	}))
 	defer upstream.Close()
-	c := config{endpoint: upstream.URL, model: "test", apiKey: "test", token: "test"}
+	c := config{endpoint: upstream.URL, model: "test", apiKey: "test", ocsTokens: []string{"test"}}
 	req := httptest.NewRequest(http.MethodPost, "/api/answer", strings.NewReader(`{"title":"image https://example.com/test.png","type":"single","options":"A. one"}`))
 	req.Header.Set("Authorization", "Bearer test")
 	w := httptest.NewRecorder()
@@ -227,7 +230,7 @@ func TestInvalidModelAnswerAndNonRetryableError(t *testing.T) {
 				w.WriteHeader(http.StatusUnauthorized)
 			}
 		}))
-		c := config{endpoint: upstream.URL, model: "test", apiKey: "test", token: "test"}
+		c := config{endpoint: upstream.URL, model: "test", apiKey: "test", ocsTokens: []string{"test"}}
 		req := httptest.NewRequest(http.MethodPost, "/api/answer", strings.NewReader(`{"title":"question","type":"single","options":"A. one"}`))
 		req.Header.Set("Authorization", "Bearer test")
 		w := httptest.NewRecorder()

@@ -22,19 +22,24 @@ import (
 )
 
 type config struct {
-	endpoint, apiKey, model, token string
-	reasoningEffort                string
-	maxOutputTokens                int
+	endpoint, apiKey, model string
+	ocsTokens               []string
+	reasoningEffort         string
+	maxOutputTokens         int
+	logging                 bool
+	logger                  *requestLogger
+	metrics                 *requestMetrics
 }
 
 type fileConfig struct {
-	BaseURL         string `json:"base_url"`
-	APIKey          string `json:"api_key"`
-	Model           string `json:"model"`
-	Token           string `json:"token"`
-	Listen          string `json:"listen"`
-	ReasoningEffort string `json:"reasoning_effort"`
-	MaxOutputTokens int    `json:"max_output_tokens"`
+	BaseURL         string   `json:"base_url"`
+	APIKey          string   `json:"api_key"`
+	Model           string   `json:"model"`
+	OCSToken        []string `json:"ocs_token"`
+	Listen          string   `json:"listen"`
+	ReasoningEffort string   `json:"reasoning_effort"`
+	MaxOutputTokens int      `json:"max_output_tokens"`
+	LogEnabled      bool     `json:"log_enabled"`
 }
 
 type question struct {
@@ -60,6 +65,14 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	if c.logging {
+		file, err := os.OpenFile(filepath.Join(filepath.Dir(*path), "answers.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+		if err != nil {
+			log.Fatalf("cannot open answer log: %v", err)
+		}
+		defer file.Close()
+		c.logger = &requestLogger{file: file}
+	}
 	client := &http.Client{Timeout: 60 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	server := &http.Server{Addr: address, Handler: handler(c, client), ReadHeaderTimeout: 5 * time.Second}
 	log.Printf("listening on %s", address)
@@ -76,7 +89,7 @@ func loadConfig(path string) (config, string, error) {
 		}
 		encoder := json.NewEncoder(file)
 		encoder.SetIndent("", "  ")
-		writeErr := encoder.Encode(fileConfig{Listen: "127.0.0.1:7777"})
+		writeErr := encoder.Encode(fileConfig{Listen: "127.0.0.1:7777", OCSToken: []string{}})
 		closeErr := file.Close()
 		if writeErr != nil {
 			return config{}, "", fmt.Errorf("cannot write config: %w", writeErr)
@@ -92,10 +105,15 @@ func loadConfig(path string) (config, string, error) {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return config{}, "", errors.New("invalid JSON configuration")
 	}
-	c := config{endpoint: strings.TrimRight(strings.TrimSpace(raw.BaseURL), "/"), apiKey: raw.APIKey, model: strings.TrimSpace(raw.Model), token: raw.Token, reasoningEffort: strings.TrimSpace(raw.ReasoningEffort), maxOutputTokens: raw.MaxOutputTokens}
+	c := config{endpoint: strings.TrimRight(strings.TrimSpace(raw.BaseURL), "/"), apiKey: raw.APIKey, model: strings.TrimSpace(raw.Model), ocsTokens: raw.OCSToken, reasoningEffort: strings.TrimSpace(raw.ReasoningEffort), maxOutputTokens: raw.MaxOutputTokens, logging: raw.LogEnabled}
 	u, err := url.Parse(c.endpoint)
-	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" || strings.TrimSpace(c.apiKey) == "" || c.model == "" || strings.TrimSpace(c.token) == "" {
-		return config{}, "", errors.New("configure base_url, api_key, model and token in the JSON file")
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" || strings.TrimSpace(c.apiKey) == "" || c.model == "" || len(c.ocsTokens) == 0 {
+		return config{}, "", errors.New("configure base_url, api_key, model and ocs_token (an array) in the JSON file")
+	}
+	for _, token := range c.ocsTokens {
+		if strings.TrimSpace(token) == "" {
+			return config{}, "", errors.New("ocs_token entries must not be empty")
+		}
 	}
 	switch c.reasoningEffort {
 	case "", "none", "minimal", "low", "medium", "high", "xhigh", "max":
@@ -115,16 +133,33 @@ func loadConfig(path string) (config, string, error) {
 func handler(c config, client *http.Client) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/answer", func(w http.ResponseWriter, r *http.Request) {
+		started := time.Now()
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") || subtle.ConstantTimeCompare([]byte(token), []byte(c.token)) != 1 {
+		matched := 0
+		for _, allowed := range c.ocsTokens {
+			matched |= subtle.ConstantTimeCompare([]byte(token), []byte(allowed))
+		}
+		if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") || matched != 1 {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		var q question
+		requestConfig := c
+		status := "invalid_request"
+		if c.logger != nil {
+			metrics := &requestMetrics{started: started}
+			requestConfig.metrics = metrics
+			defer func() {
+				entry := metrics.entry(q, c, token, status, time.Now())
+				if err := c.logger.write(entry); err != nil {
+					log.Printf("cannot write answer log: %v", err)
+				}
+			}()
+		}
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&q); err != nil {
 			http.Error(w, "invalid request", http.StatusBadRequest)
 			return
@@ -136,14 +171,19 @@ func handler(c config, client *http.Client) http.Handler {
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 150*time.Second)
 		defer cancel()
-		answer, err := answerQuestion(ctx, client, c, q)
+		status = "upstream_error"
+		answer, err := answerQuestion(ctx, client, requestConfig, q)
 		if err != nil {
 			log.Printf("answer request failed: %v", err)
 			http.Error(w, "answer unavailable", http.StatusBadGateway)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		json.NewEncoder(w).Encode(map[string]string{"question": q.Title, "answer": answer})
+		if err := json.NewEncoder(w).Encode(map[string]string{"question": q.Title, "answer": answer}); err != nil {
+			status = "write_error"
+			return
+		}
+		status = "success"
 	})
 	return mux
 }
@@ -188,20 +228,14 @@ func answerQuestion(ctx context.Context, client *http.Client, c config, q questi
 	if c.maxOutputTokens > 0 {
 		request["max_output_tokens"] = c.maxOutputTokens
 	}
+	if c.metrics != nil {
+		request["stream"] = true
+	}
 	body, err := json.Marshal(request)
 	if err != nil {
 		return "", err
 	}
-	var result struct {
-		Status string `json:"status"`
-		Output []struct {
-			Type    string `json:"type"`
-			Content []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			} `json:"content"`
-		} `json:"output"`
-	}
+	var result responseResult
 	for attempt := 0; attempt < 3; attempt++ {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint+"/responses", bytes.NewReader(body))
 		if err != nil {
@@ -214,7 +248,11 @@ func answerQuestion(ctx context.Context, client *http.Client, c config, q questi
 		delay := time.Duration(attempt+1) * time.Second
 		if err == nil {
 			if resp.StatusCode == http.StatusOK {
-				err = json.NewDecoder(io.LimitReader(resp.Body, 2<<20)).Decode(&result)
+				if c.metrics != nil {
+					result, err = readResponseStream(resp.Body, c.metrics)
+				} else {
+					err = json.NewDecoder(io.LimitReader(resp.Body, 2<<20)).Decode(&result)
+				}
 				resp.Body.Close()
 				if err != nil {
 					return "", errors.New("invalid upstream response")
