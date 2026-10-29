@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -10,6 +11,91 @@ import (
 	"strings"
 	"testing"
 )
+
+func TestResponseSettings(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		effort string
+		limit  int
+	}{
+		{name: "unset"},
+		{name: "effort only", effort: "low"},
+		{name: "limit only", limit: 2048},
+		{name: "configured", effort: "high", limit: 4096},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body map[string]json.RawMessage
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Error(err)
+					return
+				}
+				if tc.effort == "" {
+					if _, ok := body["reasoning"]; ok {
+						t.Error("unexpected reasoning")
+					}
+				} else {
+					var reasoning struct {
+						Effort string `json:"effort"`
+					}
+					if json.Unmarshal(body["reasoning"], &reasoning) != nil || reasoning.Effort != tc.effort {
+						t.Error("incorrect reasoning effort")
+					}
+				}
+				if tc.limit == 0 {
+					if _, ok := body["max_output_tokens"]; ok {
+						t.Error("unexpected token limit")
+					}
+				} else {
+					var limit int
+					if json.Unmarshal(body["max_output_tokens"], &limit) != nil || limit != tc.limit {
+						t.Error("incorrect token limit")
+					}
+				}
+				fmt.Fprint(w, response(`["1"]`))
+			}))
+			defer upstream.Close()
+			path := filepath.Join(t.TempDir(), "config.json")
+			data, err := json.Marshal(fileConfig{BaseURL: upstream.URL, APIKey: "test", Model: "test", Token: "test", ReasoningEffort: tc.effort, MaxOutputTokens: tc.limit})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			c, _, err := loadConfig(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			answer, err := answerQuestion(context.Background(), upstream.Client(), c, question{Title: "question", Type: "single", Options: "A. one"})
+			if err != nil || answer != "one" {
+				t.Fatalf("answer %q: %v", answer, err)
+			}
+		})
+	}
+}
+
+func TestInvalidResponseSettings(t *testing.T) {
+	for _, tc := range []struct {
+		effort string
+		limit  int
+	}{
+		{effort: "unknown"},
+		{limit: -1},
+	} {
+		path := filepath.Join(t.TempDir(), "config.json")
+		data, err := json.Marshal(fileConfig{BaseURL: "https://example.com/v1", APIKey: "test", Model: "test", Token: "test", ReasoningEffort: tc.effort, MaxOutputTokens: tc.limit})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := loadConfig(path); err == nil {
+			t.Fatalf("accepted invalid settings: %+v", tc)
+		}
+	}
+}
 
 func TestLoadConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")

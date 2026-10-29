@@ -32,6 +32,8 @@ chmod +x ./ocs-ai-answerer
 | `model` | 模型名称，需支持 Responses API 和结构化输出。 |
 | `token` | 自行设置的 OCS 访问口令，建议使用较长的随机字母和数字。注意不是AI API的token！ |
 | `listen` | 监听地址，默认为 `127.0.0.1:7777`。 |
+| `reasoning_effort` | 可选，思考等级：`none`、`minimal`、`low`、`medium`、`high`、`xhigh` 或 `max`；留空使用上游默认值。可用等级取决于模型。 |
+| `max_output_tokens` | 可选，输出 token 上限，正整数；设为 `0` 或省略时使用上游默认值。包含推理 token，设置过低可能导致回答不完整。 |
 
 `config.json` 包含密钥，请勿分享或提交到 Git。题目和图片地址会发送给配置的上游服务。
 
